@@ -9,8 +9,10 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIDWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.springframework.aop.framework.AopContext;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,6 +33,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private RedisIDWorker redisIDWorker;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     /**
      * 抢购秒杀优惠券
@@ -57,12 +62,36 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足！");
         }
 
-        Long userId = UserHolder.getUser().getId();
+        /*Long userId = UserHolder.getUser().getId();
+        // 使用 JDK 的同步锁
         synchronized (userId.toString().intern()) {// 锁的是当前用户
             // 获取代理对象（事务）
             IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
             return proxy.createVoucherOrder(voucherId);
+        }*/
+
+        // 使用分布式锁
+        // 创建锁对象
+        Long userId = UserHolder.getUser().getId();
+        SimpleRedisLock simpleRedisLock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        // 获取锁
+        boolean isLock = simpleRedisLock.tryLock(200L);
+        // 判断是否获取成功
+        if(!isLock) {
+            // 失败，返回错误信息
+            return Result.fail("不允许重复下单！");
         }
+
+        // 成功，执行下单操作
+        // 获取代理对象（事务）
+        try {
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+            return proxy.createVoucherOrder(voucherId);
+        } finally {
+            // 下单完成，释放锁
+            simpleRedisLock.unLock();
+        }
+
     }
 
     @Transactional
